@@ -3,20 +3,21 @@
 # Copyright (c) mobiveil
 
 import math
-import rospy, sys
-from std_msgs.msg import String
-from sensor_msgs.msg import Imu
+import rospy
+from std_msgs.msg import String, Bool
+from sensor_msgs.msg import Imu, LaserScan, Image, Range
 from ubiquity_motor.msg import MotorState
-from tf.transformations import euler_from_quaternion
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+from geometry_msgs.msg import Twist
 import signal
-import configparser
+import threading
 import datetime
 
 X_AXIS = -110
 Y_AXIS = -1
 
 CURRENT_THRESHOLD = 0.75
-SENSOR_MSG_INITIAL_TIMEOUT = 20  # sec
+SENSOR_MSG_INITIAL_TIMEOUT = 20
 SENSOR_MSG_TIMEOUT = 2
 
 OVER_CURRENT_OCCURRENCE = 0
@@ -26,42 +27,25 @@ SENSOR_FAILURE_OCCURRENCE = 0
 SENSOR_FAILURE_OCCURRENCE_LIMIT = 2
 PUBLISH_VELOCITY = True
 sensor_data_timer = None
-IMU_COUNTER = 0
-DELAY_IMU_RATE = 20
+IMU_OCCURRENCE = 0
+VALUE = None
+IMU_OCCURRENCE_LIMIT = 2
 
 Sensor_Status = {"motor": True, "lidar": True, "camera": True}
 System_Status = {"battery": True, "arduino": True}
 
-config = configparser.ConfigParser()
-config.read("/haystack_disinfect_report/robot_config.ini")
+rospy.set_param("/haystack/motor_current_threshold", 0.75)
 
-if config.has_option("ROBOT", "MOTOR_CURRENT_THRESHOLD"):
-    CURRENT_THRESHOLD = float(config["ROBOT"]["MOTOR_CURRENT_THRESHOLD"])
+front_tilt_value = 3
 
-rospy.set_param("/haystack/motor_current_threshold", 0.65)
+back_tilt_value = 3
 
-if config.has_option("ROBOT", "FRONT_TILT_TOLERANCE"):
-    front_tilt_value = float(config["ROBOT"]["FRONT_TILT_TOLERANCE"])
-else:
-    front_tilt_value = 10
-if config.has_option("ROBOT", "BACK_TILT_TOLERANCE"):
-    back_tilt_value = float(config["ROBOT"]["BACK_TILT_TOLERANCE"])
-else:
-    back_tilt_value = 10
+right_tilt_value = 5
 
-if config.has_option("ROBOT", "RIGHT_TILT_TOLERANCE"):
-    right_tilt_value = float(config["ROBOT"]["RIGHT_TILT_TOLERANCE"])
-else:
-    right_tilt_value = 10
-
-if config.has_option("ROBOT", "LEFT_TILT_TOLERANCE"):
-    left_tilt_value = float(config["ROBOT"]["LEFT_TILT_TOLERANCE"])
-else:
-    left_tilt_value = 10
+left_tilt_value = 5
 
 timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 log_file_name = f"robot_log_{timestamp}.txt"
-# log_file = open(log_file_name, "w")
 
 x_axis_upper_threshold = X_AXIS + front_tilt_value
 x_axis_lower_threshold = X_AXIS - back_tilt_value
@@ -77,47 +61,53 @@ def write_log(message):
 
 
 def imu_callback(data):
-    global OVER_CURRENT_OCCURRENCE, PUBLISH_VELOCITY, IMU_COUNTER
-    value = [round(math.degrees(i)) for i in euler_from_quaternion([data.orientation.x, data.orientation.y, data.orientation.z, data.orientation.w])]
-    write_log(f"IMU LIVE VALUE: {value[0], value[1]}")
-
-    if IMU_COUNTER > DELAY_IMU_RATE:
-        if x_axis_lower_threshold > value[0] or value[0] > x_axis_upper_threshold or y_axis_lower_threshold > value[1] or value[1] > y_axis_upper_threshold:
-            try:
-                mode = rospy.get_param("/haystack/mode")
-            except:
-                mode = "IDLE"
-            if mode != "FOLLOW":
-                log_message = f"IMU DETECTED: Robot got tilted! Orientation: {value[0], value[1]}"
-                write_log(log_message)
-                OVER_CURRENT_OCCURRENCE = 0
-                rospy.signal_shutdown("IMU")
-
-        IMU_COUNTER = 0
-    else:
-        IMU_COUNTER += 1
+    global VALUE
+    VALUE = [round(math.degrees(i)) for i in euler_from_quaternion([data.orientation.x, data.orientation.y,
+                                                                    data.orientation.z, data.orientation.w])]
+    write_log(f"IMU DATA: {VALUE[0], VALUE[1]}")
+    print(f"IMU DATA: {VALUE[0], VALUE[1]}")
 
 
 def motor_state_callback(data):
-    global OVER_CURRENT_OCCURRENCE, PUBLISH_VELOCITY
+    global OVER_CURRENT_OCCURRENCE, PUBLISH_VELOCITY, VALUE, IMU_OCCURRENCE
     Sensor_Status["motor"] = True
-    write_log(f"Left_Current: {data.leftCurrent}, Right_Current: {data.rightCurrent}")
+    write_log(f"MOTOR CURRENT : Left_Current: {data.leftCurrent}, Right_Current: {data.rightCurrent}")
+    print(f"MOTOR CURRENT : Left_Current: {data.leftCurrent}, Right_Current: {data.rightCurrent}")
     if data.leftCurrent > CURRENT_THRESHOLD or data.rightCurrent > CURRENT_THRESHOLD:
+        try:
+            mode = rospy.get_param("/haystack/mode")
+        except:
+            mode = "IDLE"
+
         if OVER_CURRENT_OCCURRENCE > OVER_CURRENT_OCCURRENCE_LIMIT:
-            try:
-                mode = rospy.get_param("/haystack/mode")
-            except:
-                mode = "IDLE"
+
             if mode != "FOLLOW":
-                log_message = f"MOTOR CURRENT DETECTED: Over Current Detected, Bumping Detected. Left Current: {data.leftCurrent}, Right Current: {data.rightCurrent}"
+                print("Over Current Detected")
+                log_message = f">>>>>>>>>>>MOTOR CURRENT DETECTED : Left Current: {data.leftCurrent}, Right Current: {data.rightCurrent}"
                 write_log(log_message)
+                print(f"MOTOR CURRENT DETECTED : Left Current: {data.leftCurrent}, Right Current: {data.rightCurrent}")
                 OVER_CURRENT_OCCURRENCE = 0
-                # log_file.close()
                 rospy.signal_shutdown("over current")
 
-        OVER_CURRENT_OCCURRENCE += 1
+        else:
+            OVER_CURRENT_OCCURRENCE += 1
+            if x_axis_lower_threshold > VALUE[0] or VALUE[0] > x_axis_upper_threshold or \
+                    y_axis_lower_threshold > VALUE[1] or VALUE[1] > y_axis_upper_threshold:
+                if IMU_OCCURRENCE > IMU_OCCURRENCE_LIMIT:
+
+                    print("ROBOT GOT TILTED !")
+                    log_message = f">>>>>>>>>>>>>>>ROBOT GOT TILTED : DATA : {VALUE[0], VALUE[1]}"
+                    write_log(log_message)
+                    print(f"ROBOT GOT TILTED : DATA: {VALUE[0], VALUE[1]}")
+                    IMU_OCCURRENCE = 0
+                    OVER_CURRENT_OCCURRENCE = 0
+                    rospy.signal_shutdown("IMU")
+                else:
+                    IMU_OCCURRENCE += 1
+
     else:
         OVER_CURRENT_OCCURRENCE = 0
+        PUBLISH_VELOCITY = True
 
 
 if __name__ == '__main__':
