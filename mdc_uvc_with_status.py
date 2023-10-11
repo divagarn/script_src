@@ -4,6 +4,7 @@ import rospy
 import time
 import threading
 import subprocess
+import datetime
 
 rospy.init_node("data_publisher")
 device_macs = ["AD:C3:5A:FA:42:79", "83:0D:B2:C9:53:9B", "21:A3:F6:9D:E6:CC"]
@@ -22,8 +23,21 @@ device_obj_list = [None for _ in range(len(device_macs))]
 dosage_data = []
 Stop_flag = False
 
+if rospy.has_param("/final_dose_value"):
+    print("cleared ......")
+    rospy.delete_param("/final_dose_value")
+
 # Initialize flags for each device
 device_flags = [False] * len(device_macs)
+
+timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+log_file_name = f"uv_dose_log_{timestamp}.txt"
+
+
+def write_log(message):
+    log_file = open(log_file_name, "a")
+    log_file.write(f"{message}\n")
+    log_file.close()
 
 
 def check_bluetooth_device_status(device_mac):
@@ -92,9 +106,7 @@ def check_and_reconnect(device_mac, index_):
 
         if device_flags[index_] and (not last_connection_status[index_]):
             # print(f"Subscribing to characteristic for {device_mac}")
-            device_obj_list[index_].subscribe(characteristic_uuid,
-                                              callback=lambda handle, value: handle_data(handle, value, device_mac,
-                                                                                         index_))
+            device_obj_list[index_].subscribe(characteristic_uuid,callback=lambda handle, value: handle_data(handle, value, device_mac, index_))
 
             print('Calling....', device_mac)
         last_connection_status[index_] = device_flags[index_]
@@ -124,14 +136,27 @@ for i, device_mac in enumerate(device_macs):
 while not rospy.is_shutdown():
     try:
         time.sleep(10)
+        final_result_string = ""
+
         for di in range(len(device_macs)):
-            # print(device_macs[di],device_flags[di])
-            if (len(DosageValues[di]) > 0):
-                print(device_macs[di], device_flags[di], DosageValues[di][-1])
+            if len(DosageValues[di]) > 0:
+                final_result = f"{device_macs[di]};{device_flags[di]};{DosageValues[di][-1]}"
+                write_log(f"{device_macs[di]};{device_flags[di]};{DosageValues[di][-1]}")
+                final_result_string += final_result
+
+                if di < len(device_macs) - 1:
+                    final_result_string += ", "
+
+        # Print and store the concatenated result as a ROS parameter
+        print(final_result_string)
+        rospy.set_param("/final_dose_value", final_result_string)
+
+        time.sleep(10)
     except rospy.ROSInterruptException:
         for adapter in adapters:
             adapter.stop()
         break
+
 Stop_flag = True
 print('Calling the adapter close')
 for i, device_mac in enumerate(device_macs):
